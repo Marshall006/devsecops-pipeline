@@ -1,0 +1,27 @@
+# Sans limite mémoire, un pod défaillant peut affamer tout le nœud.
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: require-resources
+  annotations:
+    policies.kyverno.io/title: Requêtes et limites obligatoires
+    policies.kyverno.io/category: Best Practices
+    policies.kyverno.io/severity: medium
+spec:
+  validationActions: [Deny]
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [pods]
+    # Portée : le namespace des applications uniquement
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: apps
+  validations:
+    - expression: >-
+        object.spec.containers.all(c,
+          c.?resources.?requests.?cpu.hasValue() && c.?resources.?requests.?memory.hasValue()
+          && c.?resources.?limits.?memory.hasValue())
+      message: "[require-resources] Chaque conteneur doit déclarer requests.cpu, requests.memory et limits.memory."

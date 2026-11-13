@@ -1,0 +1,46 @@
+# Contrôles essentiels du profil Kubernetes « Pod Security Standards :
+# restricted », exprimés en CEL (le langage d'expressions de Kubernetes).
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: pod-security-restricted
+  annotations:
+    policies.kyverno.io/title: Pod Security Standards (restricted)
+    policies.kyverno.io/category: Pod Security
+    policies.kyverno.io/severity: high
+spec:
+  validationActions: [Deny]
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [pods]
+    # Portée : le namespace des applications uniquement
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: apps
+  validations:
+    - expression: >-
+        !object.spec.?hostNetwork.orValue(false) && !object.spec.?hostPID.orValue(false)
+          && !object.spec.?hostIPC.orValue(false)
+      message: "[pod-security-restricted] hostNetwork, hostPID et hostIPC sont interdits."
+    - expression: >-
+        object.spec.containers.all(c, !c.?securityContext.?privileged.orValue(false))
+      message: "[pod-security-restricted] Les conteneurs privilégiés sont interdits."
+    - expression: >-
+        object.spec.containers.all(c,
+          c.?securityContext.?runAsNonRoot.orValue(object.spec.?securityContext.?runAsNonRoot.orValue(false)) == true
+          && c.?securityContext.?runAsUser.orValue(object.spec.?securityContext.?runAsUser.orValue(1)) != 0)
+      message: "[pod-security-restricted] Les conteneurs doivent tourner en non-root (runAsNonRoot: true, runAsUser != 0)."
+    - expression: >-
+        object.spec.containers.all(c, c.?securityContext.?allowPrivilegeEscalation.orValue(true) == false)
+      message: "[pod-security-restricted] allowPrivilegeEscalation doit valoir false."
+    - expression: >-
+        object.spec.containers.all(c, 'ALL' in c.?securityContext.?capabilities.?drop.orValue([]))
+      message: "[pod-security-restricted] Les capabilities Linux doivent être supprimées (drop: [ALL])."
+    - expression: >-
+        object.spec.containers.all(c,
+          c.?securityContext.?seccompProfile.?type.orValue(object.spec.?securityContext.?seccompProfile.?type.orValue(''))
+            in ['RuntimeDefault', 'Localhost'])
+      message: "[pod-security-restricted] Un profil seccomp RuntimeDefault ou Localhost est obligatoire."

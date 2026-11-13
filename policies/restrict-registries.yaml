@@ -1,0 +1,26 @@
+# Seul notre registre est autorisé : pas d'image « trouvée sur Internet ».
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: restrict-image-registries
+  annotations:
+    policies.kyverno.io/title: Registres autorisés
+    policies.kyverno.io/category: Supply Chain Security
+    policies.kyverno.io/severity: high
+spec:
+  validationActions: [Deny]
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [pods]
+    # Portée : le namespace des applications uniquement
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: apps
+  validations:
+    - expression: >-
+        (object.spec.containers + object.spec.?initContainers.orValue([]))
+          .all(c, c.image.startsWith('ghcr.io/marshall006/'))
+      message: "[restrict-image-registries] Images autorisées uniquement depuis ghcr.io/marshall006/."

@@ -1,0 +1,49 @@
+# Seules les images SIGNÉES par le pipeline de ce dépôt (branche main) sont
+# admises. La signature « keyless » de Sigstore lie l'image à l'identité du
+# workflow GitHub qui l'a construite (certificat éphémère + journal public
+# Rekor) : aucune clé privée à stocker, rien à voler.
+apiVersion: policies.kyverno.io/v1
+kind: ImageValidatingPolicy
+metadata:
+  name: require-signed-images
+  annotations:
+    policies.kyverno.io/title: Images signées obligatoires
+    policies.kyverno.io/category: Supply Chain Security
+    policies.kyverno.io/severity: high
+spec:
+  validationActions: [Deny]
+  failurePolicy: Fail
+  webhookConfiguration:
+    timeoutSeconds: 30
+  evaluation:
+    background:
+      enabled: false
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [pods]
+    # Portée : le namespace des applications uniquement
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: apps
+  matchImageReferences:
+    - glob: "ghcr.io/marshall006/*"
+  validationConfigurations:
+    mutateDigest: true
+    verifyDigest: true
+    required: true
+  attestors:
+    - name: cosign
+      cosign:
+        keyless:
+          identities:
+            - issuer: https://token.actions.githubusercontent.com
+              subjectRegExp: ^https://github\.com/Marshall006/devsecops-pipeline/\.github/workflows/.+@refs/heads/main$
+        ctlog:
+          url: https://rekor.sigstore.dev
+  validations:
+    - expression: >-
+        images.containers.map(image, verifyImageSignatures(image, [attestors.cosign])).all(e, e > 0)
+      message: "[require-signed-images] Image non signée par le pipeline officiel (Cosign keyless)."

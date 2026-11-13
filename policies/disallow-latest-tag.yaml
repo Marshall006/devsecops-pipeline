@@ -1,0 +1,27 @@
+# Le tag « latest » change dans le temps : on ne sait plus ce qui tourne.
+# Exige un tag explicite (autre que latest) ou un digest sha256.
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: disallow-latest-tag
+  annotations:
+    policies.kyverno.io/title: Tag latest interdit
+    policies.kyverno.io/category: Best Practices
+    policies.kyverno.io/severity: medium
+spec:
+  validationActions: [Deny]
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [pods]
+    # Portée : le namespace des applications uniquement
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: apps
+  validations:
+    - expression: >-
+        object.spec.containers.all(c,
+          c.image.matches('^.+(@sha256:[a-f0-9]{64}|:[^/:@]+)$') && !c.image.endsWith(':latest'))
+      message: "[disallow-latest-tag] Le tag « latest » (ou l'absence de tag) est interdit : utilisez un tag immuable ou un digest."

@@ -23,6 +23,9 @@ RUN pip install --no-cache-dir --require-hashes -r requirements.txt
 COPY --chown=65532:65532 pyproject.toml .
 COPY --chown=65532:65532 src ./src
 RUN pip install --no-cache-dir --no-deps .
+# Outils d'installation inutiles à l'exécution : on les retire de l'image
+# finale (Trivy y avait détecté CVE-2025-47273 dans setuptools).
+RUN pip uninstall -y setuptools pip
 
 # hadolint ignore=DL3007
 FROM cgr.dev/chainguard/python:latest

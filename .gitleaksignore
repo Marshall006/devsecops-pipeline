@@ -1,0 +1,6 @@
+# Faux positifs analysés et acceptés (une ligne = une empreinte précise).
+# Ne jamais ignorer une règle entière : seulement l'occurrence vérifiée.
+#
+# scripts/admission-tests.sh:18 — tag d'image « sha-<commit Git> » public
+# (identifiant de commit, pas un secret), signalé par generic-api-key.
+a296ea2050a4443e05f7ac188ad287fb0fc4575d:scripts/admission-tests.sh:generic-api-key:18

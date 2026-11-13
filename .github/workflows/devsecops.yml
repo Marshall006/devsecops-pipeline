@@ -43,9 +43,12 @@ jobs:
         with:
           fetch-depth: 0  # tout l'historique : un secret supprimé reste dans Git
           persist-credentials: false
-      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Binaire officiel (image versionnée) plutôt que l'action : analyse de
+      # TOUT l'historique, sans dépendance tierce supplémentaire.
+      - name: Gitleaks (tout l'historique Git)
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo ghcr.io/gitleaks/gitleaks:v8.30.1 \
+            git . --redact --verbose --report-format sarif --report-path gitleaks.sarif
 
   # ------------------------------------------------------------------- SAST
   sast:

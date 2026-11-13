@@ -1,0 +1,6 @@
+# Versions anciennes avec des CVE publiques (nom de fichier volontairement
+# non standard pour ne pas déclencher d'alertes Dependabot sur le dépôt).
+flask==0.12.2
+jinja2==2.10
+pyyaml==5.3.1
+requests==2.19.0

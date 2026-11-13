@@ -1,0 +1,52 @@
+# =============================================================================
+# Contre-épreuve : la chaîne doit DÉTECTER les failles injectées dans
+# demo/vulnerable-app. Ce job réussit uniquement si chaque scanner échoue.
+# =============================================================================
+name: Security gate demo
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions: {}
+
+env:
+  TRIVY_IMAGE: aquasec/trivy:0.76.2
+
+jobs:
+  must-detect:
+    name: Les scanners détectent les failles injectées
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - run: pip install semgrep pip-audit
+      - name: Chaque scanner doit échouer sur le code vulnérable
+        working-directory: demo/vulnerable-app
+        run: |
+          fails=0
+          check() {  # check <nom> <commande…> : la commande DOIT échouer
+            local name="$1"; shift
+            if out=$("$@" 2>&1); then
+              echo "::error::$name n'a rien détecté !"; echo "| $name | ❌ rien détecté |" >> "$GITHUB_STEP_SUMMARY"; fails=$((fails+1))
+            else
+              n=$(grep -cE "$PATTERN" <<<"$out" || true)
+              echo "✔ $name : failles détectées ($n)"; echo "| $name | ✅ $n détection(s) |" >> "$GITHUB_STEP_SUMMARY"
+            fi
+            echo "$out" | tail -25
+          }
+          echo "| Scanner | Résultat |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          PATTERN="python\."  check "Semgrep (SAST)" semgrep scan --config p/python --config p/owasp-top-ten --error --metrics off .
+          PATTERN="(PYSEC|GHSA|CVE)-" check "pip-audit (SCA)" pip-audit -r deps.lst --no-deps --disable-pip --desc
+          PATTERN="DL[0-9]{4}" check "Hadolint (Dockerfile)" docker run --rm -i hadolint/hadolint:v2.12.0 < Dockerfile
+          PATTERN="(HIGH|CRITICAL)" check "Trivy (IaC)" docker run --rm -v "$PWD:/src" -w /src $TRIVY_IMAGE config . --exit-code 1
+          exit $fails

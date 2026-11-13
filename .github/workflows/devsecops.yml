@@ -1,0 +1,291 @@
+# =============================================================================
+# Chaîne DevSecOps : « shift left » + chaîne d'approvisionnement sécurisée
+#
+#   secrets ─┐
+#   sast  ───┤
+#   sca   ───┼──> build ──> scan image ──> [main] push ──> SBOM ──> signature
+#   iac   ───┤                                   ──> provenance SLSA ──> e2e
+#   tests ───┤                                                (Kyverno)
+#   policies ┘
+#
+# Bonnes pratiques appliquées au pipeline lui-même :
+#   - actions épinglées par SHA de commit (cf. attaque de trivy-action, mars 2026)
+#   - permissions minimales par job, persist-credentials: false
+#   - aucun secret stocké : signature « keyless » via l'identité OIDC du workflow
+# =============================================================================
+name: DevSecOps
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/marshall006/invoice-api
+  TRIVY_IMAGE: aquasec/trivy:0.76.2
+
+jobs:
+  # ---------------------------------------------------------------- Secrets
+  secrets:
+    name: Secrets (Gitleaks)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0  # tout l'historique : un secret supprimé reste dans Git
+          persist-credentials: false
+      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ------------------------------------------------------------------- SAST
+  sast:
+    name: SAST (Semgrep)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - run: pip install semgrep
+      - name: Analyse statique du code (règles Python + OWASP Top 10)
+        run: |
+          semgrep scan --config p/python --config p/owasp-top-ten --config p/secrets \
+            --sarif --output semgrep.sarif --error --metrics off app/src
+      - uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        if: always() && github.event_name == 'push'
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+  # -------------------------------------------------------------------- SCA
+  sca:
+    name: Dépendances (pip-audit + Trivy)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - run: pip install pip-audit
+      - name: pip-audit (base OSV / PyPI Advisory)
+        run: pip-audit -r app/requirements.txt --require-hashes --disable-pip --strict --desc
+      - name: Trivy (vulnérabilités des dépendances)
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src $TRIVY_IMAGE fs app \
+            --scanners vuln --severity HIGH,CRITICAL --exit-code 1 --no-progress
+          docker run --rm -v "$PWD:/src" -w /src $TRIVY_IMAGE fs app \
+            --scanners vuln --format sarif --output trivy-deps.sarif --no-progress
+      - uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        if: always() && github.event_name == 'push'
+        with:
+          sarif_file: trivy-deps.sarif
+          category: trivy-deps
+
+  # -------------------------------------------------------------------- IaC
+  iac:
+    name: Dockerfile & manifestes (Hadolint + Trivy)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
+        with:
+          dockerfile: app/Dockerfile
+          failure-threshold: warning
+      - name: Trivy (mauvaises configurations Docker et Kubernetes)
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src $TRIVY_IMAGE config . \
+            --skip-dirs demo --skip-dirs policies/tests --severity HIGH,CRITICAL --exit-code 1
+
+  # ----------------------------------------------------------------- Tests
+  tests:
+    name: Tests & qualité
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - run: |
+          pip install --require-hashes -r requirements.txt
+          pip install --no-deps -e . && pip install pytest httpx ruff
+      - run: ruff check . && ruff format --check .
+      - run: pytest -v
+
+  # ------------------------------------------------- Sécurité du pipeline
+  workflows:
+    name: Audit des workflows (zizmor)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: pip install zizmor
+      - name: Détecte injections, permissions excessives, actions non épinglées
+        run: zizmor --min-severity medium .github/workflows/
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ------------------------------------------------- Build + scan d'image
+  build:
+    name: Image (build, scan, SBOM, signature)
+    needs: [secrets, sast, sca, iac, tests, workflows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write        # publier sur GHCR
+      id-token: write        # identité OIDC pour la signature keyless
+      attestations: write    # provenance SLSA
+      security-events: write # rapport Trivy dans l'onglet Security
+    outputs:
+      image: ${{ steps.ref.outputs.image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Construire l'image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: app
+          load: true
+          tags: invoice-api:ci
+      - name: Scanner l'image (bloque si CVE HIGH/CRITICAL corrigeable)
+        run: |
+          docker save invoice-api:ci -o image.tar
+          docker run --rm -v "$PWD:/src" -w /src $TRIVY_IMAGE image --input image.tar \
+            --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --no-progress
+          docker run --rm -v "$PWD:/src" -w /src $TRIVY_IMAGE image --input image.tar \
+            --format sarif --output trivy-image.sarif --no-progress
+      - uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        if: always() && github.event_name == 'push'
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
+      - name: Test de fumée du conteneur
+        run: |
+          docker run -d --name api -p 8000:8000 invoice-api:ci
+          for i in $(seq 1 20); do curl -sf localhost:8000/health && break || sleep 1; done
+          curl -sf localhost:8000/health
+          # L'image finale ne doit contenir AUCUN shell
+          ! docker exec api sh -c true 2>/dev/null && echo "✔ aucun shell dans l'image"
+
+      # ------------- Publication et chaîne de confiance (branche main) -------
+      - name: Connexion à GHCR
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publier
+        id: push
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: app
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:sha-${{ github.sha }}
+            ${{ env.IMAGE }}:main
+      - name: Référence immuable (digest)
+        id: ref
+        if: steps.push.outcome == 'success'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: echo "image=${IMAGE}@${DIGEST}" >> "$GITHUB_OUTPUT"
+      - name: SBOM (inventaire des composants, CycloneDX)
+        if: steps.push.outcome == 'success'
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          image: ${{ steps.ref.outputs.image }}
+          format: cyclonedx-json
+          output-file: sbom.cdx.json
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+        if: steps.push.outcome == 'success'
+      - name: Signer l'image et attester le SBOM (Cosign keyless)
+        if: steps.push.outcome == 'success'
+        env:
+          REF: ${{ steps.ref.outputs.image }}
+        run: |
+          cosign sign --yes "$REF"
+          cosign attest --yes --type cyclonedx --predicate sbom.cdx.json "$REF"
+      - name: Provenance SLSA (comment l'image a été construite)
+        if: steps.push.outcome == 'success'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+      - name: Vérifier la signature (comme le ferait un consommateur)
+        if: steps.push.outcome == 'success'
+        env:
+          REF: ${{ steps.ref.outputs.image }}
+        run: |
+          cosign verify "$REF" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity-regexp '^https://github\.com/Marshall006/devsecops-pipeline/\.github/workflows/.+@refs/heads/main$' \
+            | jq '.[0].optional | {Issuer, Subject, githubWorkflowSha}'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.push.outcome == 'success'
+        with:
+          name: sbom
+          path: sbom.cdx.json
+
+  # ------------------------------------- Contrôle d'admission (cluster réel)
+  admission:
+    name: Politiques Kyverno sur cluster kind
+    needs: build
+    if: always() && needs.build.result != 'failure' && needs.build.result != 'cancelled'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
+      - uses: helm/kind-action@ea822c7bf1874f08e5a491df991c228edffc3376 # v1.15.2
+        with:
+          cluster_name: devsecops
+      - name: Installer Kyverno
+        run: |
+          helm repo add kyverno https://kyverno.github.io/kyverno/
+          helm install kyverno kyverno/kyverno -n kyverno --create-namespace --wait --timeout 10m
+          helm list -n kyverno
+      - name: Tests d'admission
+        env:
+          SIGNED_IMAGE: ${{ needs.build.outputs.image }}
+        run: ./scripts/admission-tests.sh "$SIGNED_IMAGE"

@@ -22,10 +22,11 @@ echo "| Test | Attendu | Résultat |" >> "$summary"
 echo "|---|---|---|" >> "$summary"
 
 pod() { yq "select(.metadata.name == \"$1\")" "$PODS"; }
+TMP=$(mktemp)
 
-expect_denied() {  # expect_denied <nom> <motif du message> <manifeste sur stdin>
+expect_denied() {  # expect_denied <nom> <motif du message>  (manifeste dans $TMP)
   local name="$1" pattern="$2" out
-  out=$(kubectl apply --dry-run=server -f - 2>&1)
+  out=$(kubectl apply --dry-run=server -f "$TMP" 2>&1)
   if [ $? -ne 0 ] && grep -q "$pattern" <<<"$out"; then
     echo "✔ refusé comme prévu : $name"; echo "| $name | refusé | ✅ refusé |" >> "$summary"
   else
@@ -34,9 +35,9 @@ expect_denied() {  # expect_denied <nom> <motif du message> <manifeste sur stdin
   fi
 }
 
-expect_allowed() {  # expect_allowed <nom> <manifeste sur stdin>
+expect_allowed() {  # expect_allowed <nom>  (manifeste dans $TMP)
   local name="$1" out
-  if out=$(kubectl apply --dry-run=server -f - 2>&1); then
+  if out=$(kubectl apply --dry-run=server -f "$TMP" 2>&1); then
     echo "✔ accepté comme prévu : $name"; echo "| $name | accepté | ✅ accepté |" >> "$summary"
   else
     echo "✘ $name aurait dû être accepté"; echo "$out"
@@ -47,35 +48,41 @@ expect_allowed() {  # expect_allowed <nom> <manifeste sur stdin>
 # 1. Politiques de configuration (la politique de signature est appliquée
 #    ensuite, pour que chaque refus provienne bien de la politique testée)
 kubectl create namespace apps --dry-run=client -o yaml | kubectl apply -f -
+apply_policy() {  # le webhook de Kyverno peut refuser les connexions au démarrage
+  for _ in $(seq 1 30); do kubectl apply -f "$1" && return 0; sleep 5; done
+  echo "::error::Impossible d'appliquer $1"; exit 1
+}
 for f in policies/*.yaml; do
-  [ "$(basename "$f")" = "require-signed-images.yaml" ] || kubectl apply -f "$f"
+  [ "$(basename "$f")" = "require-signed-images.yaml" ] || apply_policy "$f"
 done
 # Les webhooks Kyverno peuvent mettre quelques secondes à s'enregistrer
 echo "Attente de l'activation des politiques…"
 for _ in $(seq 1 40); do
-  if pod bad-registry | kubectl apply --dry-run=server -f - 2>&1 | grep -q "restrict-image-registries"; then break; fi
+  if pod bad-registry | kubectl apply --dry-run=server -f - 2>&1 | grep -q "restrict-image-registries" \
+    && pod bad-latest | kubectl apply --dry-run=server -f - 2>&1 | grep -q "disallow-latest-tag"; then break; fi
   sleep 5
 done
 
-pod bad-latest     | expect_denied "Tag latest"             "disallow-latest-tag"
-pod bad-registry   | expect_denied "Registre non autorisé"  "restrict-image-registries"
-pod bad-privileged | expect_denied "Pod privilégié en root"  "pod-security-restricted"
-pod bad-no-limits  | expect_denied "Sans limites mémoire"   "require-resources"
+pod bad-latest     > "$TMP"; expect_denied "Tag latest"             "disallow-latest-tag"
+pod bad-registry   > "$TMP"; expect_denied "Registre non autorisé"  "restrict-image-registries"
+pod bad-privileged > "$TMP"; expect_denied "Pod privilégié en root" "pod-security-restricted"
+pod bad-no-limits  > "$TMP"; expect_denied "Sans limites mémoire"   "require-resources"
 
 if [ -n "$SIGNED_IMAGE" ]; then
   # 2. Politique de signature
-  kubectl apply -f policies/require-signed-images.yaml
+  apply_policy policies/require-signed-images.yaml
   for _ in $(seq 1 40); do
     pod good | yq ".spec.containers[0].image = \"$UNSIGNED_IMAGE\"" \
       | kubectl apply --dry-run=server -f - 2>&1 | grep -q "require-signed-images" && break
     sleep 5
   done
   # Image non signée par ce pipeline -> refusée par la vérification Sigstore
-  pod good | yq ".metadata.name = \"unsigned\" | .spec.containers[0].image = \"$UNSIGNED_IMAGE\"" \
-    | expect_denied "Image non signée" "require-signed-images"
+  pod good | yq ".metadata.name = \"unsigned\" | .spec.containers[0].image = \"$UNSIGNED_IMAGE\"" > "$TMP"
+  expect_denied "Image non signée" "require-signed-images"
 
   # Image signée -> déploiement réel, puis appel de l'API
-  sed "s|IMAGE_REF|$SIGNED_IMAGE|" deploy/invoice-api.yaml | expect_allowed "Image signée (dry-run)"
+  sed "s|IMAGE_REF|$SIGNED_IMAGE|" deploy/invoice-api.yaml > "$TMP"
+  expect_allowed "Image signée (dry-run)"
   sed "s|IMAGE_REF|$SIGNED_IMAGE|" deploy/invoice-api.yaml | kubectl apply -f -
   if kubectl -n apps rollout status deploy/invoice-api --timeout=180s; then
     kubectl -n apps port-forward svc/invoice-api 8080:80 >/dev/null 2>&1 &

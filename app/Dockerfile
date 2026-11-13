@@ -15,11 +15,13 @@ FROM cgr.dev/chainguard/python:latest-dev AS build
 WORKDIR /app
 RUN python -m venv /app/venv
 ENV PATH="/app/venv/bin:$PATH"
-COPY requirements.txt .
+COPY --chown=65532:65532 requirements.txt .
 # --require-hashes : chaque paquet doit correspondre à son empreinte SHA-256
+# Les images Chainguard tournent en non-root (UID 65532) même pendant le build :
+# les fichiers copiés doivent lui appartenir (--chown).
 RUN pip install --no-cache-dir --require-hashes -r requirements.txt
-COPY pyproject.toml .
-COPY src ./src
+COPY --chown=65532:65532 pyproject.toml .
+COPY --chown=65532:65532 src ./src
 RUN pip install --no-cache-dir --no-deps .
 
 # hadolint ignore=DL3007

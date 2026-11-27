@@ -69,7 +69,7 @@ jobs:
         run: |
           semgrep scan --config p/python --config p/owasp-top-ten --config p/secrets \
             --sarif --output semgrep.sarif --error --metrics off app/src
-      - uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+      - uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
         if: always() && github.event_name == 'push' && hashFiles('semgrep.sarif') != ''
         with:
           sarif_file: semgrep.sarif
@@ -98,7 +98,7 @@ jobs:
             --scanners vuln --severity HIGH,CRITICAL --exit-code 1 --no-progress
           docker run --rm -v "$PWD:/src" -w /src $TRIVY_IMAGE fs app \
             --scanners vuln --format sarif --output trivy-deps.sarif --no-progress
-      - uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+      - uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
         if: always() && github.event_name == 'push' && hashFiles('trivy-deps.sarif') != ''
         with:
           sarif_file: trivy-deps.sarif
@@ -192,7 +192,7 @@ jobs:
             --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --no-progress
           docker run --rm -v "$PWD:/src" -w /src $TRIVY_IMAGE image --input image.tar \
             --format sarif --output trivy-image.sarif --no-progress
-      - uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+      - uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
         if: always() && github.event_name == 'push' && hashFiles('trivy-image.sarif') != ''
         with:
           sarif_file: trivy-image.sarif
@@ -231,12 +231,12 @@ jobs:
         run: echo "image=${IMAGE}@${DIGEST}" >> "$GITHUB_OUTPUT"
       - name: SBOM (inventaire des composants, CycloneDX)
         if: steps.push.outcome == 'success'
-        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        uses: anchore/sbom-action@dfcb83b97731532d72be422cbc51ee64adb6fd56 # v0.24.4
         with:
           image: ${{ steps.ref.outputs.image }}
           format: cyclonedx-json
           output-file: sbom.cdx.json
-      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
         if: steps.push.outcome == 'success'
       - name: Signer l'image et attester le SBOM (Cosign keyless)
         if: steps.push.outcome == 'success'
